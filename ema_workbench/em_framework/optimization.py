@@ -9,10 +9,10 @@ import random
 import shutil
 import tarfile
 import warnings
+import time
 
 import numpy as np
 import pandas as pd
-
 
 from . import callbacks, evaluators
 from .points import Scenario, Policy
@@ -49,6 +49,8 @@ try:
         Solution,
         InvertedGenerationalDistance,
         Spacing,
+        GeneticAlgorithm,
+        Archive,
     )  # @UnresolvedImport
     from platypus import Problem as PlatypusProblem
 
@@ -58,19 +60,23 @@ try:
 except ImportError:
     warnings.warn("platypus based optimization not available", ImportWarning)
 
+
     class PlatypusProblem:
         constraints = []
 
         def __init__(self, *args, **kwargs):
             pass
 
+
     class Variator:
         def __init__(self, *args, **kwargs):
             pass
 
+
     class RandomGenerator:
         def __call__(self, *args, **kwargs):
             pass
+
 
     class TournamentSelector:
         def __init__(self, *args, **kwargs):
@@ -79,8 +85,10 @@ except ImportError:
         def __call__(self, *args, **kwargs):
             pass
 
+
     class EpsilonProgressContinuation:
         pass
+
 
     EpsNSGAII = None
     platypus = None
@@ -96,6 +104,8 @@ __all__ = [
     "EpsilonProgress",
     "Convergence",
     "ArchiveLogger",
+    "ArchiveLoggerMultiobj",
+    "RunTime",
     "OperatorProbabilities",
     "rebuild_platypus_population",
     "HypervolumeMetric",
@@ -668,13 +678,100 @@ class ArchiveLogger(AbstractConvergenceMetric):
     """
 
     def __init__(
-        self, directory, decision_varnames, outcome_varnames, base_filename="archives.tar.gz"
+            self, directory, decision_varnames, outcome_varnames, base_filename="archives.tar.gz"
     ):
         super().__init__("archive_logger")
 
         # FIXME how to handle case where directory already exists
         self.directory = os.path.abspath(directory)
-        self.temp = os.path.join(self.directory, "tmp")
+        self.temp = os.path.join(self.directory, str(round(time.time())))
+        os.mkdir(self.temp)
+
+        self.base = base_filename
+        self.decision_varnames = decision_varnames
+        self.outcome_varnames = outcome_varnames
+        self.tarfilename = os.path.join(self.directory, base_filename)
+
+        # IvD 10/6
+        self.start_time = time.time()
+
+        # self.index = 0
+
+    def __call__(self, optimizer):
+        # IvD 10/6
+        if optimizer.result != []:
+            result = {}
+            result['best_score'] = optimizer.fittest.objectives[0]
+            result['elapsed_time'] = time.time() - self.start_time
+
+            for i, dv in enumerate(self.decision_varnames):
+                result[dv] = int(np.floor(optimizer.fittest.variables[i]))
+
+            result['probability_SBX'] = optimizer.variator.probabilities[0]
+            result['probability_PCX'] = optimizer.variator.probabilities[1]
+            result['probability_DE'] = optimizer.variator.probabilities[2]
+            result['probability_UNDX'] = optimizer.variator.probabilities[3]
+            result['probability_SPX'] = optimizer.variator.probabilities[4]
+            result['probability_UM'] = optimizer.variator.probabilities[5]
+
+            archive = pd.DataFrame.from_dict([result])
+
+            # archive = to_dataframe(optimizer.result, self.decision_varnames, self.outcome_varnames)
+            archive.to_csv(os.path.join(self.temp, f"{optimizer.nfe}.csv"))
+
+    def reset(self):
+        # FIXME what needs to go here?
+        pass
+
+    def get_results(self):
+        with tarfile.open(self.tarfilename, "w:gz") as z:
+            z.add(self.temp, arcname=os.path.basename(self.temp))
+
+        shutil.rmtree(self.temp)
+        return None
+
+    @classmethod
+    def load_archives(cls, filename):
+        """load the archives stored with the ArchiveLogger
+
+        Parameters
+        ----------
+        filename : str
+                   relative path to file
+
+        Returns
+        -------
+        dict with nfe as key and dataframe as vlaue
+        """
+
+        archives = {}
+        with tarfile.open(os.path.abspath(filename)) as fh:
+            for entry in fh.getmembers():
+                if entry.name.endswith("csv"):
+                    key = entry.name.split("/")[1][:-4]
+                    archives[int(key)] = pd.read_csv(fh.extractfile(entry))
+        return archives
+
+
+class ArchiveLoggerMultiobj(AbstractConvergenceMetric):
+    """Helper class to write the archive to disk at each iteration
+
+    Parameters
+    ----------
+    directory : str
+    decision_varnames : list of str
+    outcome_varnames : list of str
+    base_filename : str, optional
+    """
+
+    def __init__(
+            self, directory, decision_varnames, outcome_varnames, base_filename="archives.tar.gz"
+    ):
+        super().__init__("archive_logger")
+
+        # FIXME how to handle case where directory already exists
+        self.directory = os.path.abspath(directory)
+        self.temp = os.path.join(self.directory, str(round(time.time())))
         os.mkdir(self.temp)
 
         self.base = base_filename
@@ -720,6 +817,17 @@ class ArchiveLogger(AbstractConvergenceMetric):
                     key = entry.name.split("/")[1][:-4]
                     archives[int(key)] = pd.read_csv(fh.extractfile(entry))
         return archives
+
+
+class RunTime(AbstractConvergenceMetric):
+    """epsilon progress convergence metric class"""
+
+    def __init__(self):
+        super().__init__("run_time_seconds")
+        self.start_time = time.time()
+
+    def __call__(self, optimizer):
+        self.results.append(time.time() - self.start_time)
 
 
 class OperatorProbabilities(AbstractConvergenceMetric):
@@ -953,9 +1061,9 @@ class CombinedVariator(Variator):
 
         for j in range(type.size):
             if (
-                (child2.variables[i][j] not in s1)
-                and (child1.variables[i][j] not in s2)
-                and (random.random() < 0.5)
+                    (child2.variables[i][j] not in s1)
+                    and (child1.variables[i][j] not in s2)
+                    and (random.random() < 0.5)
             ):
                 temp = child1.variables[i][j]
                 child1.variables[i][j] = child2.variables[i][j]
@@ -1028,15 +1136,15 @@ class CombinedVariator(Variator):
 
 
 def _optimize(
-    problem,
-    evaluator,
-    algorithm,
-    convergence,
-    nfe,
-    convergence_freq,
-    logging_freq,
-    variator=None,
-    **kwargs,
+        problem,
+        evaluator,
+        algorithm,
+        convergence,
+        nfe,
+        convergence_freq,
+        logging_freq,
+        variator=None,
+        **kwargs,
 ):
     klass = problem.types[0].__class__
 
@@ -1076,8 +1184,8 @@ def _optimize(
     results = to_dataframe(optimizer.result, problem.parameter_names, problem.outcome_names)
     convergence = convergence.to_dataframe()
 
-    message = "optimization completed, found {} solutions"
-    _logger.info(message.format(len(optimizer.archive)))
+    # message = "optimization completed, found {} solutions"
+    # _logger.info(message.format(len(optimizer.archive)))
 
     if convergence.empty:
         return results
@@ -1139,14 +1247,14 @@ class GenerationalBorg(EpsilonProgressContinuation):
     undx_eta = 0.35
 
     def __init__(
-        self,
-        problem,
-        epsilons,
-        population_size=100,
-        generator=RandomGenerator(),
-        selector=TournamentSelector(2),
-        variator=None,
-        **kwargs,
+            self,
+            problem,
+            epsilons,
+            population_size=100,
+            generator=RandomGenerator(),
+            selector=TournamentSelector(2),
+            variator=None,
+            **kwargs,
     ):
         self.problem = problem
 
@@ -1202,4 +1310,231 @@ class GenerationalBorg(EpsilonProgressContinuation):
                 EpsilonBoxArchive(epsilons),
                 **kwargs,
             )
+        )
+
+
+class SingleObjectiveBorg(GeneticAlgorithm):  ### added 10/10/2022 IvD
+    """A generational implementation of the BORG Framework
+
+    This algorithm adopts Epsilon Progress Continuation, and Auto Adaptive
+    Operator Selection, but embeds them within the NSGAII generational
+    algorithm, rather than the steady state implementation used by the BORG
+    algorithm.
+
+    The parametrization of all operators is based on the default values as used
+    in Borg 1.9.
+
+    Note:: limited to RealParameters only.
+
+    """
+
+    pm_p = BORGDefaultDescriptor(lambda x: 1 / x)
+    pm_dist = 20
+
+    sbx_prop = 1
+    sbx_dist = 15
+
+    de_rate = 0.1
+    de_stepsize = 0.5
+
+    um_p = BORGDefaultDescriptor(lambda x: 1 / x)
+
+    spx_nparents = 10
+    spx_noffspring = 2
+    spx_expansion = 0.3
+
+    pcx_nparents = 10
+    pcx_noffspring = 2
+    pcx_eta = 0.1
+    pcx_zeta = 0.1
+
+    undx_nparents = 10
+    undx_noffspring = 2
+    undx_zeta = 0.5
+    undx_eta = 0.35
+
+    def __init__(
+            self,
+            problem,
+            population_size=100,
+            generator=RandomGenerator(),
+            selector=TournamentSelector(2),
+            variator=None,
+            **kwargs,
+    ):
+        self.problem = problem
+
+        # Parameterization taken from
+        # Borg: An Auto-Adaptive MOEA Framework - Hadka, Reed
+        variators = [
+            GAOperator(
+                SBX(probability=self.sbx_prop, distribution_index=self.sbx_dist),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                PCX(
+                    nparents=self.pcx_nparents,
+                    noffspring=self.pcx_noffspring,
+                    eta=self.pcx_eta,
+                    zeta=self.pcx_zeta,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                DifferentialEvolution(crossover_rate=self.de_rate, step_size=self.de_stepsize),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                UNDX(
+                    nparents=self.undx_nparents,
+                    noffspring=self.undx_noffspring,
+                    zeta=self.undx_zeta,
+                    eta=self.undx_eta,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                SPX(
+                    nparents=self.spx_nparents,
+                    noffspring=self.spx_noffspring,
+                    expansion=self.spx_expansion,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            UM(probability=self.um_p),
+        ]
+
+        variator = Multimethod(self, variators)
+
+        super().__init__(
+            problem,
+            population_size=population_size,
+            offspring_size=150,  # IvD 100
+            generator=generator,
+            selector=selector,
+            variator=variator,
+            # comparator=ParetoDominance(),
+            **kwargs,
+        )
+
+
+class IreneArchive(Archive):
+
+    def __init__(self, archive_size):
+        super(IreneArchive, self).__init__()
+        # self.improvements = 0
+        self.archive_size = archive_size
+
+    def extend(self, solutions):
+        # add all solutions to archive
+        contents = self._contents + solutions
+        # sort on score
+        contents_sorted = sorted(contents, key=lambda x: x.objectives[0], reverse=True)
+        # top 100
+        self._contents = contents_sorted[:self.archive_size]
+
+
+class SingleObjectiveBorgWithArchive(GeneticAlgorithm):  ### added 10/06/2022 IvD
+    """A generational implementation of the BORG Framework
+
+    This algorithm adopts Epsilon Progress Continuation, and Auto Adaptive
+    Operator Selection, but embeds them within the NSGAII generational
+    algorithm, rather than the steady state implementation used by the BORG
+    algorithm.
+
+    The parametrization of all operators is based on the default values as used
+    in Borg 1.9.
+
+    Note:: limited to RealParameters only.
+
+    """
+
+    pm_p = BORGDefaultDescriptor(lambda x: 1 / x)
+    pm_dist = 20
+
+    sbx_prop = 1
+    sbx_dist = 15
+
+    de_rate = 0.1
+    de_stepsize = 0.5
+
+    um_p = BORGDefaultDescriptor(lambda x: 1 / x)
+
+    spx_nparents = 10
+    spx_noffspring = 2
+    spx_expansion = 0.3
+
+    pcx_nparents = 10
+    pcx_noffspring = 2
+    pcx_eta = 0.1
+    pcx_zeta = 0.1
+
+    undx_nparents = 10
+    undx_noffspring = 2
+    undx_zeta = 0.5
+    undx_eta = 0.35
+
+    def __init__(
+            self,
+            problem,
+            population_size=100,
+            generator=RandomGenerator(),
+            selector=TournamentSelector(2),
+            variator=None,
+            **kwargs,
+    ):
+        self.problem = problem
+        self.archive = IreneArchive(archive_size=100)
+
+        # Parameterization taken from
+        # Borg: An Auto-Adaptive MOEA Framework - Hadka, Reed
+        variators = [
+            GAOperator(
+                SBX(probability=self.sbx_prop, distribution_index=self.sbx_dist),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                PCX(
+                    nparents=self.pcx_nparents,
+                    noffspring=self.pcx_noffspring,
+                    eta=self.pcx_eta,
+                    zeta=self.pcx_zeta,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                DifferentialEvolution(crossover_rate=self.de_rate, step_size=self.de_stepsize),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                UNDX(
+                    nparents=self.undx_nparents,
+                    noffspring=self.undx_noffspring,
+                    zeta=self.undx_zeta,
+                    eta=self.undx_eta,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            GAOperator(
+                SPX(
+                    nparents=self.spx_nparents,
+                    noffspring=self.spx_noffspring,
+                    expansion=self.spx_expansion,
+                ),
+                PM(probability=self.pm_p, distribution_index=self.pm_dist),
+            ),
+            UM(probability=self.um_p),
+        ]
+
+        variator = Multimethod(self, variators)
+
+        super().__init__(
+            problem,
+            population_size=population_size,
+            offspring_size=150,  # IvD 100
+            generator=generator,
+            selector=selector,
+            variator=variator,
+            # comparator=ParetoDominance(),
+            **kwargs,
         )
